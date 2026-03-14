@@ -1,0 +1,7 @@
+node_modules
+.env
+vector-db
+sessions.json
+logs
+.git
+*.md

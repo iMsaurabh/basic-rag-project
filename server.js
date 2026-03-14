@@ -169,7 +169,18 @@ app.use((err, req, res, next) => {
     res.status(500).json({ error: "Internal server error" });
 });
 
-// Start server on port 3000
-app.listen(3000, () => {
-    logger.info("Server running on http://localhost:3000");
+// Simple endpoint that returns 200 OK
+// Render uses this to verify your app is running
+app.get("/health", (req, res) => {
+    res.status(200).json({
+        status: "ok",
+        timestamp: new Date().toISOString()
+    });
 });
+
+// Start server on port 3000
+// After
+const PORT = process.env.PORT || 3000;
+// process.env.PORT is set by Render in production
+// falls back to 3000 for local development
+app.listen(PORT, () => logger.info(`Server running on port ${PORT}`));

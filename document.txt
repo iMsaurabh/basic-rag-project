@@ -1,0 +1,32 @@
+Anthropic AI Assistant — Help Center
+
+Refund Policy
+We offer a 30 day money back guarantee on all plans. To request a refund contact support@company.com with your order ID. Refunds are processed within 7 business days.
+
+Pricing Plans
+Basic plan costs $9 per month and includes 100 queries per day.
+Pro plan costs $29 per month and includes unlimited queries and priority support.
+Enterprise plan is custom priced and includes dedicated support and SLA guarantees.
+
+Supported Features
+The assistant supports text generation, summarization, question answering, and code generation.
+It does not support image generation or voice input at this time.
+
+Data Privacy
+All conversations are encrypted in transit and at rest.
+We do not share user data with third parties.
+Data is retained for 30 days by default and can be deleted on request.
+
+Technical Requirements
+The API requires Node.js version 18 or higher.
+Rate limits are 100 requests per minute on Basic and unlimited on Pro.
+Maximum input size is 4000 tokens per request.
+
+CEO Info
+The name of CEO is Ted Huang.
+
+CFO Info
+The name of CFO is Ignlis Bron.
+
+CTO Info
+The name of CTO is Kevin Donner.

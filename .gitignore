@@ -2,7 +2,6 @@
 vector-db/
 
 # Source documents — may contain sensitive business data
-document.txt
 documents/
 
 # Session data — contains user conversations
