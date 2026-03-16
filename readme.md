@@ -1142,3 +1142,7 @@ Current setup runs all containers on one machine. For high availability across m
 
 ### WSL2 Required on Windows
 Docker Desktop on Windows requires WSL2 with a Linux distribution installed. Run `wsl --install` in PowerShell as Administrator if not already set up.
+
+# Day 27 - Browser Extension
+
+Check [my AI-Chat-Assistant-Project](https://github.com/iMsaurabh/AI-Chat-Browser-Extension)
