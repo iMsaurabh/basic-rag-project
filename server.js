@@ -7,11 +7,26 @@ import { body, validationResult } from "express-validator";
 import rateLimit from "express-rate-limit";
 
 import morgan from "morgan";
-import logger from "./logger.js";
+import logger from "./utils/logger.js";
 
-import { DOCUMENT_VERSION, MAX_HISTORY } from "./config.js";
+import {
+    PORT,
+    DOCUMENT_VERSION,
+    RATE_LIMIT_WINDOW_MS,
+    RATE_LIMIT_MAX,
+    MAX_MESSAGE_LENGTH,
+    MAX_SESSION_ID_LENGTH
+} from "./config.js";
 
-import { loadSessions, saveSessions } from "./sessionStore.js";
+// below is remoed as we are using redis now
+//import { loadSessions, saveSessions } from "./sessionStore.js";
+
+import {
+    saveSession,
+    loadSession,
+    deleteSession,
+    listSessions
+} from "./services/redisStore.js";
 
 const app = express();
 
@@ -40,9 +55,10 @@ const globalLimiter = rateLimit({
 
 // Strict limiter — applies to /chat only
 // AI calls are expensive, limit them more aggressively
+// Update your rate limiter to use config values
 const chatLimiter = rateLimit({
-    windowMs: 60 * 1000,       // 1 minute
-    max: 10,                   // max 10 chat requests per minute per IP
+    windowMs: RATE_LIMIT_WINDOW_MS,
+    max: RATE_LIMIT_MAX,
     message: { error: "Too many chat requests, please wait a minute" },
     standardHeaders: true,
     legacyHeaders: false
@@ -54,20 +70,20 @@ app.use(globalLimiter);
 // Array of validation rules for /chat endpoint
 const validateChat = [
     body("sessionId")
-        .isString()                          // must be a string
-        .trim()                              // remove whitespace from both ends
-        .notEmpty()                          // cannot be empty after trim
-        .withMessage("sessionId is required")// custom error message
-        .isLength({ max: 50 })               // max 50 characters
-        .withMessage("sessionId too long"),  // custom error message for length
+        .isString()
+        .trim()
+        .notEmpty()
+        .withMessage("sessionId is required")
+        .isLength({ max: MAX_SESSION_ID_LENGTH })
+        .withMessage("sessionId too long"),
 
     body("message")
         .isString()
         .trim()
         .notEmpty()
         .withMessage("message is required")
-        .isLength({ min: 1, max: 1000 })     // between 1 and 1000 characters
-        .withMessage("message must be between 1 and 1000 characters"),
+        .isLength({ min: 1, max: MAX_MESSAGE_LENGTH })
+        .withMessage(`message must be between 1 and ${MAX_MESSAGE_LENGTH} characters`),
 ];
 
 // Reusable middleware that checks if validation passed
@@ -92,8 +108,8 @@ function checkValidation(req, res, next) {
 // In-memory session store — stores conversation history per session
 // Simple object where key is sessionId, value is messages array
 // loads existing sessions from file on startup
-const sessions = loadSessions();
-logger.info("Sessions loaded", { count: Object.keys(sessions).length });
+// const sessions = loadSessions(); -> no longer applicable for redis
+logger.info("Server started, using Redis for session storage");
 
 // POST /chat endpoint
 // validateChat and checkValidation run before your route handler
@@ -102,30 +118,26 @@ validateChat → checkValidation → your logic → error handler*/
 app.post("/chat", chatLimiter, validateChat, checkValidation, async (req, res, next) => {
     try {
         const { sessionId, message } = req.body;
-        // no need to check for missing fields anymore — validation handles it
 
-        if (!sessions[sessionId] || sessions[sessionId].documentVersion !== DOCUMENT_VERSION) {
-            // create fresh session or reset outdated one
-            sessions[sessionId] = {
-                documentVersion: DOCUMENT_VERSION,  // track which version this session uses
+        // Load session from Redis instead of memory
+        let session = await loadSession(sessionId);
+
+        if (!session || session.documentVersion !== DOCUMENT_VERSION) {
+            session = {
+                documentVersion: DOCUMENT_VERSION,
                 messages: [
-                    {
-                        role: "system",
-                        content: "You are a helpful assistant. Always use available tools to fetch fresh information. Never rely on previous failed attempts — the knowledge base may have been updated."
-                    }
+                    { role: "system", content: "You are a helpful assistant. Always use available tools to fetch fresh information." }
                 ]
             };
         }
 
+        session.messages.push({ role: "user", content: message });
+        const reply = await runAgent(session.messages);
+        session.messages.push({ role: "assistant", content: reply });
 
-        // note: now accessing .messages instead of session directly
-        sessions[sessionId].messages.push({ role: "user", content: message });
-        const reply = await runAgent(sessions[sessionId].messages);
+        // Save updated session back to Redis
+        await saveSession(sessionId, session);
 
-        console.log("Reply:", reply);
-
-        sessions[sessionId].messages.push({ role: "assistant", content: reply });
-        saveSessions(sessions); // ← persist to file
         res.status(200).json({ reply });
 
     } catch (error) {
@@ -135,28 +147,19 @@ app.post("/chat", chatLimiter, validateChat, checkValidation, async (req, res, n
 
 // DELETE /chat/:sessionId — clears a specific session
 // :sessionId is a URL parameter — accessible via req.params.sessionId
-app.delete("/chat/:sessionId", (req, res) => {
+app.delete("/chat/:sessionId", async (req, res) => {
     const { sessionId } = req.params;
-    if (!sessions[sessionId]) {
-        return res.status(404).json({ error: "Session not found" });
-    }
-    delete sessions[sessionId];
-    saveSessions(sessions);
+    await deleteSession(sessionId);
     res.status(200).json({ message: `Session ${sessionId} cleared` });
 });
 
 // GET /sessions — lists all active sessions
-app.get("/sessions", (req, res) => {
-    try {
-        const activeSessions = Object.keys(sessions).map(sessionId => ({
-            sessionId,
-            documentVersion: sessions[sessionId].documentVersion,
-            messageCount: sessions[sessionId].messages.length - 1
-        }));
-        res.status(200).json({ sessions: activeSessions });
-    } catch (error) {
-        next(error);
-    }
+app.get("/sessions", async (req, res) => {
+    const sessionIds = await listSessions();
+    res.status(200).json({
+        sessions: sessionIds.map(id => ({ sessionId: id })),
+        count: sessionIds.length
+    });
 });
 
 // Order matters in Express
@@ -178,9 +181,41 @@ app.get("/health", (req, res) => {
     });
 });
 
-// Start server on port 3000
-// After
-const PORT = process.env.PORT || 3000;
+// GET /admin/status — system health overview
+app.get("/admin/status", async (req, res) => {
+    const sessionIds = await listSessions();
+
+    res.status(200).json({
+        status: "ok",
+        timestamp: new Date().toISOString(),
+        documentVersion: DOCUMENT_VERSION,
+        activeSessions: sessionIds.length,
+        uptime: Math.floor(process.uptime()),  // seconds since server started
+        memory: {
+            // process.memoryUsage() returns memory stats in bytes
+            // divide by 1024 twice to convert to MB
+            used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+            total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024),
+            unit: "MB"
+        }
+    });
+});
+
+// POST /admin/clear-all-sessions — wipe all sessions
+app.post("/admin/clear-all-sessions", async (req, res) => {
+    const sessionIds = await listSessions();
+
+    for (const sessionId of sessionIds) {
+        await deleteSession(sessionId);
+    }
+
+    logger.info("All sessions cleared", { count: sessionIds.length });
+    res.status(200).json({
+        message: "All sessions cleared",
+        cleared: sessionIds.length
+    });
+});
+
 // process.env.PORT is set by Render in production
 // falls back to 3000 for local development
 app.listen(PORT, () => logger.info(`Server running on port ${PORT}`));

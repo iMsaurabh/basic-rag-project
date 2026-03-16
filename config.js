@@ -1,15 +1,33 @@
-// Bump this number every time you re-run ingest.js
-// This invalidates all existing sessions automatically
-// config.js
 import fs from "fs";
 
-const stats = fs.statSync("./document.txt");
-// stats.mtimeMs = last modified time in milliseconds
-// unique number that changes automatically whenever document.txt is saved
+// Document version — auto generated from file modified time
+const stats = fs.existsSync("./document.txt")
+    ? fs.statSync("./document.txt")
+    : { mtimeMs: 1 };
+
 export const DOCUMENT_VERSION = stats.mtimeMs;
 
-export const MAX_ITERATIONS = 10;
-export const MAX_HISTORY = 10;
-export const MAX_MESSAGE_LENGTH = 1000;
-export const MAX_SESSION_ID_LENGTH = 50;
+// Server
+export const PORT = process.env.PORT || 3000;
+
+// Agent
+export const MAX_ITERATIONS = parseInt(process.env.MAX_ITERATIONS) || 10;
+export const MAX_HISTORY = parseInt(process.env.MAX_HISTORY) || 10;
+
+// Validation
+export const MAX_MESSAGE_LENGTH = parseInt(process.env.MAX_MESSAGE_LENGTH) || 1000;
+export const MAX_SESSION_ID_LENGTH = parseInt(process.env.MAX_SESSION_ID_LENGTH) || 50;
+
+// Rate limiting
+export const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 60000;
+export const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX) || 10;
+
+// Redis
+export const REDIS_URL = process.env.REDIS_URL || "redis://redis:6379";
+
+// Session
+export const SESSION_TTL = parseInt(process.env.SESSION_TTL) || 86400;
+
+// Files
 export const SESSIONS_FILE = "./sessions.json";
+export const LOGS_DIR = "./logs";

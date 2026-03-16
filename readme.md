@@ -789,3 +789,356 @@ Containers are stateless by default — `sessions.json` is lost on restart. For 
 
 ### Single Container Limitation
 Current setup runs everything in one container. Production apps split into multiple containers — one for API, one for database, one for frontend — orchestrated with Docker Compose or Kubernetes.
+
+---
+
+# Day 26 — Self-Hosted Deployment
+## Append to Day 25 README
+
+---
+
+## What We Added
+
+- Docker Compose for multi-container setup
+- Redis for persistent session storage
+- Configuration system via environment variables
+- Admin endpoints for system management
+- Self-hosting documentation
+
+---
+
+## What is Self-Hosted?
+
+```
+Cloud SaaS (Day 25)          Self-Hosted (Day 26)
+────────────────────         ────────────────────
+You run the server      →    They run the server
+You manage everything   →    They manage everything
+Your API keys           →    Their own API keys
+Your document           →    Their own documents
+Users just use URL      →    Developer runs Docker
+```
+
+Who wants self-hosted:
+- Enterprise — data never leaves their servers
+- Healthcare/Finance — regulatory compliance
+- Privacy conscious — don't trust third party cloud
+- Developers — want full control
+
+---
+
+## Part 1 — Docker Compose
+
+### What is Docker Compose?
+
+```
+docker run        → one container, one command
+docker compose up → multiple containers, one command
+                    all configured in docker-compose.yml
+```
+
+### Container Architecture
+
+```
+Your Machine
+    └── Docker
+            ├── api container      ← your Express server
+            │     Port: 3000
+            │     Built from: Dockerfile
+            │
+            └── redis container    ← session storage
+                  Port: 6379
+                  Built from: redis:7-alpine (Docker Hub)
+```
+
+### `docker-compose.yml` Explained
+
+```yaml
+services:
+
+  api:
+    build: .                    # build from Dockerfile in current dir
+    ports:
+      - "3000:3000"             # host:container port mapping
+    env_file:
+      - .env                    # load all variables from .env
+    volumes:
+      - ./document.txt:/app/document.txt  # mount file from host
+      - ./vector-db:/app/vector-db        # persist vector db
+      - ./logs:/app/logs                  # persist logs
+    depends_on:
+      - redis                   # wait for redis before starting
+    restart: unless-stopped     # auto-restart on crash
+
+  redis:
+    image: redis:7-alpine       # official image, no Dockerfile needed
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data        # named volume — managed by Docker
+    restart: unless-stopped
+
+volumes:
+  redis-data:                   # Docker manages this volume's lifecycle
+```
+
+### Container Networking
+
+```
+Inside Docker Compose network:
+  localhost = only that container itself
+  api       = the api container
+  redis     = the redis container
+
+// Wrong — api container can't reach redis via localhost
+const redis = new Redis("redis://localhost:6379");
+
+// Correct — use service name as hostname
+const redis = new Redis("redis://redis:6379");
+```
+
+---
+
+## Part 2 — Redis Session Storage
+
+### Why Redis Replaces sessions.json
+
+```
+sessions.json (before)         Redis (after)
+──────────────────────         ─────────────
+File on disk                   In-memory database
+Lost on container restart      Persists via Docker volume
+Slow for large data            Extremely fast
+Single container only          Works across containers
+No expiry                      TTL — sessions auto-expire
+```
+
+### Redis Key Operations
+
+```javascript
+// Store with expiry (TTL)
+await redis.setex(
+    `session:${sessionId}`,  // key — prefixed for organization
+    86400,                    // TTL in seconds (24 hours)
+    JSON.stringify(session)   // value must be string
+);
+
+// Retrieve
+const data = await redis.get(`session:${sessionId}`);
+const session = JSON.parse(data);
+
+// Delete
+await redis.del(`session:${sessionId}`);
+
+// Find all session keys
+const keys = await redis.keys("session:*");  // * = wildcard
+```
+
+### Session Persistence Test
+
+```bash
+# Send message
+curl -X POST http://localhost:3000/chat \
+  -d '{"sessionId": "user1", "message": "What is the refund policy?"}'
+
+# Restart api container (NOT redis)
+docker compose restart api
+
+# Ask follow up — session still exists in Redis
+curl -X POST http://localhost:3000/chat \
+  -d '{"sessionId": "user1", "message": "What did I just ask?"}'
+
+# Expected: "You asked about the refund policy"
+```
+
+---
+
+## Part 3 — Configuration System
+
+Every setting configurable via environment variable with sensible defaults:
+
+```javascript
+// config.js
+export const PORT = process.env.PORT || 3000;
+export const MAX_ITERATIONS = parseInt(process.env.MAX_ITERATIONS) || 10;
+export const MAX_HISTORY = parseInt(process.env.MAX_HISTORY) || 10;
+export const MAX_MESSAGE_LENGTH = parseInt(process.env.MAX_MESSAGE_LENGTH) || 1000;
+export const MAX_SESSION_ID_LENGTH = parseInt(process.env.MAX_SESSION_ID_LENGTH) || 50;
+export const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 60000;
+export const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX) || 10;
+export const REDIS_URL = process.env.REDIS_URL || "redis://redis:6379";
+export const SESSION_TTL = parseInt(process.env.SESSION_TTL) || 86400;
+```
+
+Self-hosters customize by editing `.env` — never touching code.
+
+---
+
+## Part 4 — Admin Endpoints
+
+```javascript
+// GET /admin/status — system overview
+{
+    status: "ok",
+    timestamp: "2026-03-16T...",
+    documentVersion: 1234567890,
+    activeSessions: 3,
+    uptime: 3600,           // seconds since start
+    memory: {
+        used: 45,           // MB currently used
+        total: 128,         // MB total allocated
+        unit: "MB"
+    }
+}
+
+// POST /admin/clear-all-sessions — wipe all sessions
+{
+    message: "All sessions cleared",
+    cleared: 3
+}
+```
+
+**`process.memoryUsage()` explained:**
+```javascript
+process.memoryUsage().heapUsed   // memory your app is actively using
+process.memoryUsage().heapTotal  // memory Node.js has allocated
+// divide by 1024 twice to convert bytes → KB → MB
+Math.round(heapUsed / 1024 / 1024)
+```
+
+---
+
+## Q&A — Key Concepts
+
+### Container vs Server
+
+```
+Physical Server (the building)
+    └── Operating System (the floors)
+            ├── Container 1 — api        (room 1)
+            ├── Container 2 — redis      (room 2)
+            └── Container 3 — nginx      (room 3)
+
+Each container:
+  ✓ Has its own isolation (walls)
+  ✓ Has its own dependencies (furniture)
+  ✓ Shares the OS kernel (building electricity)
+  ✓ Can talk to other containers via service names
+```
+
+### How Many Containers?
+
+One container per distinct service/responsibility:
+
+```
+Ask: "Is this a separate concern that could fail independently?"
+
+api     → handles HTTP requests          → one container
+redis   → handles data storage           → one container
+nginx   → handles routing/HTTPS          → one container
+worker  → handles background jobs        → one container
+```
+
+### Your Code vs Container vs Image
+
+```
+LAYER 1 — YOUR CODE (files you write)
+  server.js, agent.js, tools/, Dockerfile...
+
+LAYER 2 — IMAGE (docker build creates this)
+  Frozen snapshot: Linux OS + Node.js + your code + dependencies
+
+LAYER 3 — CONTAINER (docker compose up creates this)
+  Running instance of the image
+  Has memory, network, isolated filesystem
+
+Your code → docker build → Image → docker run → Container
+```
+
+### Running With vs Without Docker
+
+| | Without Docker | With Docker |
+|---|---|---|
+| Command | `node server.js` | `docker compose up` |
+| Redis | Need local Redis or use sessions.json | Included automatically |
+| Use when | Local development | Testing prod setup, sharing |
+| Code changes | Instant | Needs `--build` |
+
+---
+
+## Docker Compose Command Reference
+
+```bash
+# Start all containers in background
+docker compose up -d
+
+# Start and rebuild images
+docker compose up --build -d
+
+# Stop all containers
+docker compose down
+
+# Stop and wipe volumes (fresh start)
+docker compose down -v
+
+# Restart one service
+docker compose restart api
+
+# View all container status
+docker compose ps
+
+# View logs
+docker compose logs
+
+# Follow logs in real time
+docker compose logs -f
+
+# Follow logs for one service
+docker compose logs -f api
+
+# Open shell inside container
+docker compose exec api sh
+```
+
+---
+
+## New Syntaxes Reference
+
+| Syntax | What it does |
+|--------|-------------|
+| `docker compose up -d` | Start containers in background (detached) |
+| `docker compose up --build` | Rebuild images before starting |
+| `docker compose down -v` | Stop containers and remove volumes |
+| `redis.setex(key, ttl, value)` | Store in Redis with expiry time |
+| `redis.get(key)` | Retrieve from Redis |
+| `redis.del(key)` | Delete from Redis |
+| `redis.keys("pattern:*")` | Find all keys matching pattern |
+| `process.uptime()` | Seconds since Node.js process started |
+| `process.memoryUsage()` | Memory stats in bytes |
+| `parseInt(value) \|\| default` | Parse env var as integer with fallback |
+| `depends_on` | Docker Compose — wait for service before starting |
+| `restart: unless-stopped` | Auto-restart container on crash |
+
+---
+
+## ⚠️ Known Limitations
+
+### No Authentication on Admin Endpoints
+`/admin/status` and `/admin/clear-all-sessions` are publicly accessible. In production add an admin API key check:
+```javascript
+app.use("/admin", (req, res, next) => {
+    if (req.headers["x-admin-key"] !== process.env.ADMIN_KEY) {
+        return res.status(401).json({ error: "Unauthorized" });
+    }
+    next();
+});
+```
+
+### Redis Data Loss on `docker compose down -v`
+`-v` flag removes volumes including Redis data. Always use `docker compose down` without `-v` to preserve sessions.
+
+### Single Machine Only
+Current setup runs all containers on one machine. For high availability across multiple machines you need Kubernetes or Docker Swarm — beyond scope of this learning path.
+
+### WSL2 Required on Windows
+Docker Desktop on Windows requires WSL2 with a Linux distribution installed. Run `wsl --install` in PowerShell as Administrator if not already set up.

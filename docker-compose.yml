@@ -1,0 +1,35 @@
+# docker-compose.yml
+# Defines all services that make up your application
+
+version: '3.8'
+
+services:
+
+  # Your Express API
+  api:
+    build: .                    # build from Dockerfile in current directory
+    ports:
+      - "3000:3000"             # map host port to container port
+    env_file:
+      - .env                    # load environment variables from .env
+    volumes:
+      - ./document.txt:/app/document.txt  # mount document from host
+      - ./vector-db:/app/vector-db        # persist vector db
+      - ./logs:/app/logs                  # persist logs
+    depends_on:
+      - redis                   # wait for redis to start first
+    restart: unless-stopped     # auto-restart if crashes
+
+  # Redis for session storage
+  # Replaces sessions.json — faster, more reliable
+  redis:
+    image: redis:7-alpine       # official Redis image, alpine = tiny size
+    ports:
+      - "6379:6379"             # Redis default port
+    volumes:
+      - redis-data:/data        # persist Redis data
+    restart: unless-stopped
+
+# Named volumes — managed by Docker, persist between restarts
+volumes:
+  redis-data:
