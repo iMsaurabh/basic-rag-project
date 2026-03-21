@@ -394,9 +394,6 @@ Model decides which tool to call
 ---
 
 # Day 25 — Cloud SaaS Deployment
-## Append to Day 24 README
-
----
 
 ## What We Added
 
@@ -793,9 +790,6 @@ Current setup runs everything in one container. Production apps split into multi
 ---
 
 # Day 26 — Self-Hosted Deployment
-## Append to Day 25 README
-
----
 
 ## What We Added
 
@@ -1146,3 +1140,405 @@ Docker Desktop on Windows requires WSL2 with a Linux distribution installed. Run
 # Day 27 - Browser Extension
 
 Check [my AI-Chat-Assistant-Project](https://github.com/iMsaurabh/AI-Chat-Browser-Extension)
+
+# Day 28 - Front End UI
+
+Check [my AI-Chat-Assistant-FrontEnd-UI Project](https://github.com/iMsaurabh/AI-Assistant-FrontEnd.git)
+
+---
+
+# Day 29 — Authentication & Multi-tenancy
+
+## What We Added
+
+- User registration and login
+- JWT token authentication
+- Protected API routes
+- Multi-tenancy — users only see their own data
+- Persistent chat history tied to user account
+- Frontend auth flow with login/register UI
+
+---
+
+## Architecture After Day 29
+
+```
+Client Request
+    ↓
+CORS middleware           ← allows frontend origin
+    ↓
+express.json()            ← parses body
+    ↓
+Public routes (/auth/*)   ← no token needed
+    ↓
+requireAuth middleware    ← verifies JWT token
+    ↓
+Protected routes          ← req.user available here
+    ↓
+Multi-tenant data         ← userId:sessionId isolation
+```
+
+---
+
+## Core Concepts
+
+### 1. Password Hashing with bcrypt
+
+Never store plain text passwords. bcrypt hashes them one-way:
+
+```javascript
+import bcrypt from "bcryptjs";
+
+// Hash on registration — 10 = salt rounds (higher = more secure, slower)
+const hashedPassword = await bcrypt.hash(password, 10);
+
+// Compare on login — bcrypt handles the salt automatically
+const valid = await bcrypt.compare(plainPassword, hashedPassword);
+// true = passwords match, false = wrong password
+```
+
+**Why salt rounds matter:**
+```
+Salt rounds 10 = ~100ms per hash    ← good balance
+Salt rounds 12 = ~400ms per hash    ← more secure
+Salt rounds 14 = ~1.5s per hash     ← too slow for login
+```
+
+---
+
+### 2. JWT — JSON Web Token
+
+Three parts separated by dots:
+```
+eyJhbGc.eyJ1c2VySWQiOjEsImVtYWlsIjoidGVzdEB0ZXN0LmNvbSJ9.signature
+   ↑              ↑                                              ↑
+ header        payload (base64 encoded)                    signature
+```
+
+```javascript
+import jwt from "jsonwebtoken";
+
+// Create token — includes user data, expires in 24h
+const token = jwt.sign(
+    { id: user.id, email: user.email, plan: user.plan },
+    process.env.JWT_SECRET,
+    { expiresIn: "24h" }
+);
+
+// Verify token — throws if invalid or expired
+const decoded = jwt.verify(token, process.env.JWT_SECRET);
+// decoded = { id: 1, email: "test@test.com", plan: "free", iat: ..., exp: ... }
+```
+
+**Token lifecycle:**
+```
+Register/Login
+    ↓
+Server creates token with user data
+    ↓
+Client stores in localStorage
+    ↓
+Every request sends: Authorization: Bearer <token>
+    ↓
+Server verifies on every protected route
+    ↓
+Token expires after 24h → user must login again
+```
+
+---
+
+### 3. Auth Middleware
+
+Runs before protected route handlers, extracts and verifies token:
+
+```javascript
+export function requireAuth(req, res, next) {
+    const authHeader = req.headers.authorization;
+
+    // Check header exists and has correct format
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+        return res.status(401).json({ error: "No token provided" });
+    }
+
+    // "Bearer eyJhbG..." → split → ["Bearer", "eyJhbG..."] → [1]
+    const token = authHeader.split(" ")[1];
+
+    try {
+        const decoded = verifyToken(token);
+        req.user = decoded;  // attach to request — available in route handlers
+        next();              // token valid — proceed
+    } catch (error) {
+        return res.status(401).json({ error: "Invalid or expired token" });
+    }
+}
+
+// Applied to routes that need protection
+app.post("/chat", requireAuth, ...handlers);
+//                ↑
+//    runs before route handler
+//    req.user available after this
+```
+
+---
+
+### 4. Express Router
+
+Organizes routes into separate files:
+
+```javascript
+// routes/auth.js
+import express from "express";
+const router = express.Router();  // mini Express app
+
+router.post("/register", handler);
+router.post("/login", handler);
+
+export default router;
+
+// server.js
+import authRoutes from "./routes/auth.js";
+app.use("/auth", authRoutes);
+// → POST /auth/register
+// → POST /auth/login
+```
+
+---
+
+### 5. SQLite with better-sqlite3
+
+Zero-setup file-based database — no server needed:
+
+```javascript
+import Database from "better-sqlite3";
+
+const db = new Database("./data/app.db");
+
+// Pragma — database configuration
+db.pragma("journal_mode = WAL");  // better concurrent performance
+
+// Create table
+db.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        email      TEXT UNIQUE NOT NULL,
+        password   TEXT NOT NULL,
+        plan       TEXT DEFAULT 'free',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+`);
+
+// Query methods:
+db.prepare("SELECT * FROM users WHERE email = ?").get(email);
+//                                                  ↑
+//                                          ? = parameterized query
+//                                          prevents SQL injection
+//                                          .get() = one row or undefined
+
+db.prepare("INSERT INTO users (email, password) VALUES (?, ?)").run(email, hash);
+// .run() = INSERT/UPDATE/DELETE — returns { lastInsertRowid, changes }
+
+db.prepare("SELECT * FROM users").all();
+// .all() = multiple rows as array
+```
+
+---
+
+### 6. Multi-tenancy — Data Isolation
+
+Every user's data is isolated by prefixing with userId:
+
+```javascript
+// Without multi-tenancy — any user can access any session
+const sessionKey = sessionId;  // "my-chat"
+
+// With multi-tenancy — each user has their own namespace
+const sessionKey = `${req.user.id}:${sessionId}`;  // "1:my-chat"
+
+// User 1: "1:my-chat"   ← completely separate
+// User 2: "2:my-chat"   ← from each other
+```
+
+**Filtering sessions per user:**
+```javascript
+const allKeys = await listSessions();
+
+// Only return keys belonging to this user
+const userSessions = allKeys
+    .filter(key => key.startsWith(`${req.user.id}:`))
+    .map(key => ({
+        sessionId: key.split(":")[1]  // remove userId prefix
+    }));
+```
+
+---
+
+### 7. JWT Decoding on Frontend
+
+Extract user info from token without making an API call:
+
+```javascript
+// JWT payload is base64 encoded in second segment
+// header.PAYLOAD.signature
+
+function getSessionId() {
+    const token = getToken();
+    if (!token) return null;
+
+    // atob() = browser API to decode base64 string
+    const payload = JSON.parse(atob(token.split(".")[1]));
+    return `session-${payload.id}`;
+}
+// Same user always gets same sessionId → history persists across login/logout
+```
+
+---
+
+### 8. Chat History Persistence Flow
+
+```
+User logs in
+    ↓
+Frontend decodes JWT → gets userId → derives sessionId
+    ↓
+Frontend calls GET /chat/history
+    ↓
+Backend loads session from Redis using userId:sessionId
+    ↓
+Returns messages filtered to user/assistant only (no system)
+    ↓
+Frontend formats and displays history
+    ↓
+User continues conversation seamlessly
+```
+
+---
+
+## Auth Flow Diagrams
+
+### Registration
+```
+Frontend                    Backend                     Database
+────────                    ───────                     ────────
+POST /auth/register    →    Validate email/password
+                            Check email not taken   →   SELECT users WHERE email=?
+                            Hash password
+                            Insert user             →   INSERT INTO users
+                            Generate JWT token
+                       ←    Return { token }
+Store token in
+localStorage
+Redirect to chat
+```
+
+### Login
+```
+Frontend                    Backend                     Database
+────────                    ───────                     ────────
+POST /auth/login       →    Validate input
+                            Find user by email      →   SELECT * WHERE email=?
+                            bcrypt.compare()
+                            Generate JWT token
+                       ←    Return { token }
+Store token in
+localStorage
+Redirect to chat
+```
+
+### Protected Request
+```
+Frontend                    Backend
+────────                    ───────
+GET /chat/history      →    requireAuth middleware
+Authorization:              Extract token from header
+Bearer eyJhbG...            jwt.verify(token, secret)
+                            Attach req.user = decoded
+                            Route handler runs
+                            Load session from Redis
+                       ←    Return { messages }
+Display history
+```
+
+---
+
+## API Endpoints After Day 29
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `POST` | `/auth/register` | ❌ Public | Register new user |
+| `POST` | `/auth/login` | ❌ Public | Login, get token |
+| `POST` | `/chat` | ✅ Required | Send message |
+| `GET` | `/chat/history` | ✅ Required | Load chat history |
+| `GET` | `/sessions` | ✅ Required | List user sessions |
+| `DELETE` | `/chat/:sessionId` | ✅ Required | Clear session |
+| `GET` | `/health` | ❌ Public | Health check |
+| `GET` | `/admin/status` | ❌ Public | System status |
+
+---
+
+## New Syntaxes Reference
+
+| Syntax | What it does |
+|--------|-------------|
+| `bcrypt.hash(password, 10)` | Hash password with 10 salt rounds |
+| `bcrypt.compare(plain, hash)` | Compare plain password to hash |
+| `jwt.sign(payload, secret, opts)` | Create signed JWT token |
+| `jwt.verify(token, secret)` | Verify and decode JWT token |
+| `{ expiresIn: "24h" }` | Token expiry option |
+| `req.headers.authorization` | Authorization header from request |
+| `header.split(" ")[1]` | Extract token from "Bearer TOKEN" |
+| `req.user = decoded` | Attach user data to request object |
+| `express.Router()` | Create modular route handler |
+| `app.use("/path", router)` | Mount router at path prefix |
+| `db.prepare(sql).get(params)` | SQLite query returning one row |
+| `db.prepare(sql).run(params)` | SQLite INSERT/UPDATE/DELETE |
+| `db.prepare(sql).all(params)` | SQLite query returning all rows |
+| `db.exec(sql)` | Run SQL without parameters |
+| `db.pragma("journal_mode = WAL")` | Set database configuration |
+| `atob(base64string)` | Decode base64 string in browser |
+| `key.startsWith("prefix:")` | Filter keys by prefix |
+| `key.split(":")[1]` | Extract part after colon |
+| `!!value` | Convert value to boolean |
+| `.normalizeEmail()` | Lowercase email, remove dots |
+
+---
+
+## Environment Variables Added
+
+```bash
+# .env
+JWT_SECRET=your-very-long-random-secret-key-here
+JWT_EXPIRES=24h
+```
+
+**Generating a secure JWT secret:**
+```bash
+node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
+```
+
+---
+
+## ⚠️ Known Limitations
+
+### JWT Secret in Code
+Default JWT secret falls back to hardcoded string if env var not set. Always set `JWT_SECRET` in production — never use the default.
+
+### No Token Refresh
+Tokens expire after 24h and users must login again. Production apps implement refresh tokens for seamless re-authentication.
+
+### No Password Reset
+No forgot password flow. Would require email sending (nodemailer) and reset tokens stored in database.
+
+### SQLite Single File
+SQLite works for single server. For multiple servers use PostgreSQL or MySQL — same SQL syntax, different driver.
+
+### Admin Endpoints Unprotected
+`/admin/status` and `/admin/clear-all-sessions` have no auth. Add admin middleware before going to production:
+```javascript
+function requireAdmin(req, res, next) {
+    if (req.headers["x-admin-key"] !== process.env.ADMIN_KEY) {
+        return res.status(401).json({ error: "Unauthorized" });
+    }
+    next();
+}
+app.use("/admin", requireAdmin);
+```

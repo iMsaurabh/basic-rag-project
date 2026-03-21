@@ -1,6 +1,9 @@
 import "dotenv/config";
 import express from "express";
 import { runAgent } from "./agent.js";
+// auth routes and middleware
+import authRoutes from "./routes/auth.js";
+import { requireAuth } from "./middleware/auth.js";
 // body is a function that validates fields in req.body
 // validationResult collects all validation errors
 import { body, validationResult } from "express-validator";
@@ -30,18 +33,29 @@ import {
 
 const app = express();
 
-// Middleware — parses incoming JSON request bodies
-// Without this, req.body would be undefined
+// 1. CORS FIRST — before everything else
+app.use((req, res, next) => {
+    res.header("Access-Control-Allow-Origin", "*");
+    res.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    if (req.method === "OPTIONS") {
+        return res.sendStatus(200);
+    }
+    next();
+});
+
+// 2. JSON parsing
 app.use(express.json());
 
-// morgan logs every HTTP request automatically
-// "combined" is a standard Apache log format
-// stream tells morgan to use winston instead of console.log
+// 3. Morgan logging
 app.use(morgan("combined", {
     stream: {
         write: (message) => logger.info(message.trim())
     }
 }));
+
+// 4. Routes
+app.use("/auth", authRoutes);
 
 // Global limiter — applies to ALL routes
 // Prevents general abuse of your API
@@ -115,12 +129,15 @@ logger.info("Server started, using Redis for session storage");
 // validateChat and checkValidation run before your route handler
 /*Notice the route now has **4 handlers in sequence**:
 validateChat → checkValidation → your logic → error handler*/
-app.post("/chat", chatLimiter, validateChat, checkValidation, async (req, res, next) => {
+app.post("/chat", requireAuth, chatLimiter, validateChat, checkValidation, async (req, res, next) => {
     try {
         const { sessionId, message } = req.body;
 
-        // Load session from Redis instead of memory
-        let session = await loadSession(sessionId);
+        // Prefix sessionId with userId — isolates sessions per user
+        // user1:my-session and user2:my-session are completely separate
+        const userSessionId = `${req.user.id}:${sessionId}`;
+
+        let session = await loadSession(userSessionId);
 
         if (!session || session.documentVersion !== DOCUMENT_VERSION) {
             session = {
@@ -135,8 +152,7 @@ app.post("/chat", chatLimiter, validateChat, checkValidation, async (req, res, n
         const reply = await runAgent(session.messages);
         session.messages.push({ role: "assistant", content: reply });
 
-        // Save updated session back to Redis
-        await saveSession(sessionId, session);
+        await saveSession(userSessionId, session);
 
         res.status(200).json({ reply });
 
@@ -147,18 +163,38 @@ app.post("/chat", chatLimiter, validateChat, checkValidation, async (req, res, n
 
 // DELETE /chat/:sessionId — clears a specific session
 // :sessionId is a URL parameter — accessible via req.params.sessionId
-app.delete("/chat/:sessionId", async (req, res) => {
+app.delete("/chat/:sessionId", requireAuth, async (req, res) => {
     const { sessionId } = req.params;
-    await deleteSession(sessionId);
+
+    // Reconstruct the full key with userId prefix
+    const userSessionId = `${req.user.id}:${sessionId}`;
+
+    // This prevents user A from deleting user B's session
+    // even if they know the sessionId
+    await deleteSession(userSessionId);
+
     res.status(200).json({ message: `Session ${sessionId} cleared` });
 });
 
 // GET /sessions — lists all active sessions
-app.get("/sessions", async (req, res) => {
-    const sessionIds = await listSessions();
+app.get("/sessions", requireAuth, async (req, res) => {
+    const allKeys = await listSessions();
+
+    // Filter — only return sessions belonging to this user
+    // Every key is stored as "userId:sessionId"
+    // We only want keys that start with this user's ID
+    const userSessions = allKeys
+        .filter(key => key.startsWith(`${req.user.id}:`))
+        .map(key => ({
+            // Remove userId prefix before sending to client
+            // "3:my-session" → "my-session"
+            sessionId: key.split(":")[1],
+            fullKey: key
+        }));
+
     res.status(200).json({
-        sessions: sessionIds.map(id => ({ sessionId: id })),
-        count: sessionIds.length
+        sessions: userSessions,
+        count: userSessions.length
     });
 });
 
@@ -214,6 +250,19 @@ app.post("/admin/clear-all-sessions", async (req, res) => {
         message: "All sessions cleared",
         cleared: sessionIds.length
     });
+});
+
+app.get("/chat/history", requireAuth, async (req, res) => {
+    const userSessionId = `${req.user.id}:session-${req.user.id}`;
+    const session = await loadSession(userSessionId);
+
+    if (!session) {
+        return res.status(200).json({ messages: [] });
+    }
+
+    // Filter out system messages — only return user and assistant messages
+    const history = session.messages.filter(m => m.role !== "system");
+    res.status(200).json({ messages: history });
 });
 
 // process.env.PORT is set by Render in production
