@@ -1542,3 +1542,440 @@ function requireAdmin(req, res, next) {
 }
 app.use("/admin", requireAdmin);
 ```
+
+# Day 30 — Production Ready SaaS
+## Final Day — 30-Day Web Development Learning Path
+
+---
+
+## What We Completed
+
+- Environment configuration for dev and production
+- Frontend deployed to Vercel
+- Backend deployed to Render
+- Redis sessions via Upstash
+- Usage limits per user plan
+- Loading states and error boundaries
+- Full end-to-end production flow
+
+---
+
+## The Complete System
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     PRODUCTION SYSTEM                           │
+│                                                                 │
+│  ┌──────────────┐    HTTPS     ┌──────────────────────────┐   │
+│  │   Vercel     │ ──────────► │      Render               │   │
+│  │   Frontend   │ ◄────────── │      Backend API          │   │
+│  │   React app  │             │      Express + Node.js    │   │
+│  └──────────────┘             └────────────┬─────────────┘   │
+│                                            │                   │
+│                               ┌────────────┴─────────────┐   │
+│                               │                           │   │
+│                    ┌──────────┴──────┐    ┌──────────────┴┐  │
+│                    │   Upstash Redis │    │  SQLite DB    │  │
+│                    │   Sessions      │    │  Users+Usage  │  │
+│                    └─────────────────┘    └───────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Part 1 — Environment Configuration
+
+### Vite Environment Files
+
+```
+.env                  ← loaded always
+.env.development      ← loaded in dev (npm run dev)
+.env.production       ← loaded in production (npm run build)
+```
+
+```bash
+# .env.development
+VITE_API_URL=http://localhost:3000
+
+# .env.production
+VITE_API_URL=https://your-app.onrender.com
+```
+
+### Accessing Environment Variables in Vite
+
+```javascript
+// VITE_ prefix required — Vite only exposes vars with this prefix
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3000";
+//              ↑
+//    import.meta.env = Vite's way of accessing env variables
+//    process.env does NOT work in Vite frontend code
+```
+
+### Backend Environment Detection
+
+```javascript
+export const NODE_ENV = process.env.NODE_ENV || "development";
+export const IS_PRODUCTION = NODE_ENV === "production";
+export const LOG_LEVEL = IS_PRODUCTION ? "info" : "debug";
+```
+
+---
+
+## Part 2 — CORS for Production
+
+Never hardcode URLs in CORS config — use environment variables:
+
+```javascript
+app.use((req, res, next) => {
+    const allowedOrigins = [
+        "http://localhost:5173",
+        process.env.FRONTEND_URL  // set in Render env vars
+    ].filter(Boolean); // removes undefined/null values
+
+    const origin = req.headers.origin;
+    if (allowedOrigins.includes(origin)) {
+        res.header("Access-Control-Allow-Origin", origin);
+    }
+
+    res.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
+    if (req.method === "OPTIONS") return res.sendStatus(200);
+    next();
+});
+```
+
+**Rule:** URLs belong in environment variables, never in code.
+
+---
+
+## Part 3 — Usage Limits
+
+### Database Schema
+
+```sql
+CREATE TABLE IF NOT EXISTS usage (
+    user_id    INTEGER NOT NULL,
+    date       TEXT NOT NULL,    -- YYYY-MM-DD
+    count      INTEGER DEFAULT 0,
+    PRIMARY KEY (user_id, date)  -- one row per user per day
+)
+```
+
+### Upsert Pattern
+
+```javascript
+// INSERT or UPDATE in one statement
+db.prepare(`
+    INSERT INTO usage (user_id, date, count) VALUES (?, ?, 1)
+    ON CONFLICT(user_id, date) 
+    DO UPDATE SET count = count + 1
+`).run(userId, today());
+// ON CONFLICT = if row exists, run UPDATE instead of INSERT
+```
+
+### Usage Check Flow
+
+```
+User sends message
+    ↓
+Check plan (free/pro)
+    ↓
+Free plan → query today's count
+    ↓
+Count >= limit → return 429
+Count < limit → process message
+    ↓
+Increment count after successful response
+    ↓
+Return usage info in response
+```
+
+### HTTP 429 — Too Many Requests
+
+```javascript
+// Standard status code for rate/usage limits
+return res.status(429).json({
+    error: "Daily message limit reached",
+    limit: usage.limit,
+    remaining: 0,
+    upgradeMessage: "Upgrade to Pro for unlimited messages"
+});
+```
+
+---
+
+## Part 4 — Frontend Polish
+
+### Loading State on Init
+
+```jsx
+const [initializing, setInitializing] = useState(true);
+
+// Show loading UI while fetching history and usage
+if (initializing) {
+    return (
+        <div className="loading-screen">
+            <div className="typing-indicator">
+                <span></span><span></span><span></span>
+            </div>
+            <p>Loading your chat...</p>
+        </div>
+    );
+}
+```
+
+### Error Boundary
+
+Catches unexpected React errors — prevents white page of death:
+
+```jsx
+// Must be a class component — React requirement for error boundaries
+class ErrorBoundary extends Component {
+    constructor(props) {
+        super(props);
+        this.state = { hasError: false, error: null };
+    }
+
+    // Called when any child component throws
+    static getDerivedStateFromError(error) {
+        return { hasError: true, error };
+    }
+
+    render() {
+        if (this.state.hasError) {
+            return <ErrorUI message={this.state.error?.message} />;
+        }
+        return this.props.children;
+    }
+}
+
+// Wrap entire app
+<ErrorBoundary>
+    <App />
+</ErrorBoundary>
+```
+
+### Token Expiry Handling
+
+```javascript
+async function apiFetch(url, options = {}) {
+    const response = await fetch(url, options);
+
+    if (response.status === 401) {
+        removeToken();
+        window.location.reload(); // force back to login
+        return;
+    }
+
+    if (response.status === 429) {
+        const data = await response.json();
+        throw new Error(data.upgradeMessage || "Daily limit reached");
+    }
+
+    return response;
+}
+```
+
+### Message History — Correct Filter
+
+Only show messages with actual text content:
+
+```javascript
+// Backend — filter before sending to frontend
+const history = session.messages.filter(m =>
+    (m.role === "user" && m.content) ||
+    (m.role === "assistant" && m.content && !m.tool_calls)
+    // ↑ exclude tool_call messages — they have no text content
+);
+```
+
+---
+
+## Deployment Architecture
+
+### Frontend — Vercel
+
+```
+Push to GitHub
+    ↓
+Vercel detects change
+    ↓
+npm run build (uses .env.production)
+    ↓
+Static files deployed to CDN
+    ↓
+Live at https://your-app.vercel.app
+```
+
+### Backend — Render
+
+```
+Push to GitHub
+    ↓
+Render detects change
+    ↓
+npm install && npm run build (ingest.js)
+    ↓
+npm start (server.js)
+    ↓
+Live at https://your-app.onrender.com
+```
+
+### Redis — Upstash
+
+```
+Serverless Redis
+Free tier — no credit card
+TLS connection (rediss://)
+Persists across Render restarts
+```
+
+---
+
+## Environment Variables Reference
+
+### Backend (Render)
+
+```bash
+GROQ_API_KEY=your_groq_key
+OPENWEATHER_API_KEY=your_weather_key
+JWT_SECRET=your_long_random_secret
+REDIS_URL=rediss://default:pass@xxx.upstash.io:6379
+FRONTEND_URL=https://your-app.vercel.app
+DOCUMENT_VERSION=1
+FREE_LIMIT=50
+NODE_ENV=production
+PORT=3000
+```
+
+### Frontend (Vercel)
+
+```bash
+VITE_API_URL=https://your-app.onrender.com
+```
+
+---
+
+## Common Production Issues & Fixes
+
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| CORS error from Vercel | FRONTEND_URL not set | Add to Render env vars |
+| Redis ENOTFOUND | Wrong Redis URL | Use Upstash rediss:// URL |
+| SQLite directory error | data/ folder missing | Add `fs.mkdirSync` check |
+| Env var not picked up | Render needs redeploy | Manual Deploy in dashboard |
+| Duplicate chat history | tool_calls included in history | Filter `!m.tool_calls` |
+| Empty message bubbles | Empty content in history | Filter `m.content.trim() !== ""` |
+| User ID collision | SQLite reset on deploy | Clear Redis session on register |
+| 401 after token expiry | No expiry handler | Add 401 check in apiFetch |
+
+---
+
+## New Syntaxes Reference
+
+| Syntax | What it does |
+|--------|-------------|
+| `import.meta.env.VITE_X` | Access env variable in Vite frontend |
+| `process.env.NODE_ENV` | Current environment (development/production) |
+| `ON CONFLICT DO UPDATE` | SQLite upsert — insert or update |
+| `res.status(429)` | HTTP Too Many Requests |
+| `filter(Boolean)` | Remove falsy values from array |
+| `getDerivedStateFromError` | React error boundary lifecycle method |
+| `window.location.reload()` | Force page refresh |
+| `!m.tool_calls` | Check message has no tool calls |
+| `rediss://` | Redis URL with TLS (double s) |
+| `fs.mkdirSync(path, {recursive: true})` | Create directory and parents |
+
+---
+
+## What You've Built — 30 Days
+
+```
+Days 1-13:   AI chat app — deployed
+Days 14-16:  Backend APIs — Blog, URL shortener
+Days 17-18:  Todo API with permissions
+Days 19-20:  Auth boilerplate — JWT, orgs, multi-tenancy
+Days 21-23:  Agentic AI — function calling, agent loop, production hardening
+Days 24:     RAG system — vector DB, embeddings, document versioning
+Days 25-27:  Three deployment models — Cloud, Self-hosted, Browser extension
+Days 28-29:  Full stack — React frontend + JWT auth + chat history
+Day 30:      Production ready SaaS — usage limits, error handling, deployed
+```
+
+---
+
+## Full Technology Stack
+
+```
+Frontend:     React + Vite
+Styling:      Inline styles (no CSS framework)
+State:        useState, useEffect, useRef
+Auth:         JWT stored in localStorage
+Deployment:   Vercel
+
+Backend:      Node.js + Express
+AI:           Groq API (LLM)
+Embeddings:   @xenova/transformers (local)
+Vector DB:    Vectra (local files)
+Sessions:     Redis (Upstash)
+Database:     SQLite (better-sqlite3)
+Auth:         JWT + bcrypt
+Logging:      Winston + Morgan
+Validation:   express-validator
+Rate limiting: express-rate-limit
+Deployment:   Render
+
+Packaging:    Docker + Docker Compose
+Extension:    Chrome/Edge Manifest V3
+```
+
+---
+
+## What to Build Next
+
+### Immediate Improvements
+```
+1. Password reset via email (nodemailer)
+2. Pro plan upgrade (Stripe payments)
+3. Multiple knowledge bases per user
+4. Conversation titles and search
+5. Mobile responsive UI
+```
+
+### Scaling Up
+```
+1. PostgreSQL instead of SQLite
+2. Multiple agents with different specializations
+3. File upload for RAG (PDF, DOCX)
+4. Streaming responses (Server-Sent Events)
+5. Analytics dashboard
+```
+
+### Advanced Features
+```
+1. Multi-agent orchestration
+2. Memory across sessions (long-term memory)
+3. Custom tool builder UI
+4. API key management for developers
+5. White-label self-hosted version
+```
+
+---
+
+## ⚠️ Known Limitations
+
+### SQLite on Render
+Render's filesystem resets on every deploy — SQLite data is wiped. For production use PostgreSQL (Render has a free tier) with the same SQL syntax.
+
+### Render Free Tier Sleep
+Backend spins down after 15 minutes — first request takes 30 seconds to wake up. Upgrade to paid plan or use a keep-alive ping service.
+
+### Single Server
+Current setup runs on one Render instance. For high availability add load balancing and multiple instances — requires moving SQLite to PostgreSQL.
+
+### No Email Verification
+Users can register with any email. Add email verification before production launch.
+
+### Extension Not Published
+Browser extension only works in Developer Mode. Publishing to Chrome Web Store or Edge Add-ons requires review process.
