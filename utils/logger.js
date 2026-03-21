@@ -1,5 +1,7 @@
 import winston from "winston";
 
+import { LOG_LEVEL } from "../config.js";
+
 // Custom format for files — controls field order
 const fileFormat = winston.format.combine(
     winston.format.timestamp(),
@@ -22,7 +24,7 @@ const fileFormat = winston.format.combine(
 );
 
 const logger = winston.createLogger({
-    level: "info",
+    level: LOG_LEVEL,
 
     // Default format for transports that don't specify their own
     format: winston.format.combine(
