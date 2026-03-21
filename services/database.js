@@ -1,9 +1,16 @@
 import Database from "better-sqlite3";
+import fs from "fs";
 import logger from "../utils/logger.js";
 
-// Creates database file if it doesn't exist
-// SQLite stores everything in one file — no server needed
+// Create data directory if it doesn't exist
+// This runs before database connection
+if (!fs.existsSync("./data")) {
+    fs.mkdirSync("./data", { recursive: true });
+    // recursive: true = creates parent directories too if needed
+}
+
 const db = new Database("./data/app.db");
+// rest of your code stays the same
 
 logger.info("Database connected");
 
