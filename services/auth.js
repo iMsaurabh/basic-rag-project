@@ -1,29 +1,28 @@
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import db from "./database.js";
+import { deleteSession } from "./redisStore.js";
 
 const JWT_SECRET = process.env.JWT_SECRET || "your-secret-key-change-in-production";
 const JWT_EXPIRES = process.env.JWT_EXPIRES || "24h";
 
 export async function registerUser(email, password) {
-    // Check if user already exists
     const existing = db.prepare("SELECT id FROM users WHERE email = ?").get(email);
     if (existing) {
         throw new Error("Email already registered");
     }
 
-    // Hash password — never store plain text
-    // 10 = salt rounds — higher = more secure but slower
     const hashedPassword = await bcrypt.hash(password, 10);
-
-    // Insert user into database
-    // .run() executes INSERT/UPDATE/DELETE
     const result = db.prepare(
         "INSERT INTO users (email, password) VALUES (?, ?)"
     ).run(email, hashedPassword);
 
-    // result.lastInsertRowid = ID of newly created user
-    return generateToken({ id: result.lastInsertRowid, email });
+    const userId = result.lastInsertRowid;
+
+    // Clear any existing session for this user ID
+    await deleteSession(`${userId}:session-${userId}`);
+
+    return generateToken({ id: userId, email });
 }
 
 export async function loginUser(email, password) {
