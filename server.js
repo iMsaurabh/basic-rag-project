@@ -209,6 +209,13 @@ app.get("/usage", requireAuth, (req, res) => {
     });
 });
 
+// GET /debug/session — returns current session data for debugging
+app.get("/debug/session", requireAuth, async (req, res) => {
+    const userSessionId = `${req.user.id}:session-${req.user.id}`;
+    const session = await loadSession(userSessionId);
+    res.status(200).json({ session });
+});
+
 // DELETE /chat/:sessionId — clears a specific session
 // :sessionId is a URL parameter — accessible via req.params.sessionId
 app.delete("/chat/:sessionId", requireAuth, async (req, res) => {
