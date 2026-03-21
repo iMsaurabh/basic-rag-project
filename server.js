@@ -315,8 +315,13 @@ app.get("/chat/history", requireAuth, async (req, res) => {
         return res.status(200).json({ messages: [] });
     }
 
-    // Filter out system messages — only return user and assistant messages
-    const history = session.messages.filter(m => m.role !== "system");
+    const history = session.messages.filter(m =>
+        // Only user messages with content
+        (m.role === "user" && m.content) ||
+        // Only assistant messages with text content (not tool_calls)
+        (m.role === "assistant" && m.content && !m.tool_calls)
+    );
+
     res.status(200).json({ messages: history });
 });
 
