@@ -37,7 +37,6 @@ const app = express();
 app.use((req, res, next) => {
     const allowedOrigins = [
         "http://localhost:5173",
-        "https://your-app.vercel.app",  // ← add your Vercel URL
         process.env.FRONTEND_URL        // ← or use env variable
     ];
 
