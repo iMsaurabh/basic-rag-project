@@ -30,6 +30,15 @@ db.exec(`
     )
 `);
 
+db.exec(`
+    CREATE TABLE IF NOT EXISTS usage (
+        user_id    INTEGER NOT NULL,
+        date       TEXT NOT NULL,    -- YYYY-MM-DD format
+        count      INTEGER DEFAULT 0,
+        PRIMARY KEY (user_id, date)  -- one row per user per day
+    )
+`);
+
 logger.info("Database tables ready");
 
 export default db;

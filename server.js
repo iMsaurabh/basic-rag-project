@@ -4,6 +4,7 @@ import { runAgent } from "./agent.js";
 // auth routes and middleware
 import authRoutes from "./routes/auth.js";
 import { requireAuth } from "./middleware/auth.js";
+import { checkUsageLimit, incrementUsage, getUserUsage } from "./services/usage.js";
 // body is a function that validates fields in req.body
 // validationResult collects all validation errors
 import { body, validationResult } from "express-validator";
@@ -139,21 +140,33 @@ logger.info("Server started, using Redis for session storage");
 // validateChat and checkValidation run before your route handler
 /*Notice the route now has **4 handlers in sequence**:
 validateChat → checkValidation → your logic → error handler*/
+
+
 app.post("/chat", requireAuth, chatLimiter, validateChat, checkValidation, async (req, res, next) => {
     try {
         const { sessionId, message } = req.body;
 
-        // Prefix sessionId with userId — isolates sessions per user
-        // user1:my-session and user2:my-session are completely separate
-        const userSessionId = `${req.user.id}:${sessionId}`;
+        // Check usage limit before processing
+        const usage = checkUsageLimit(req.user.id, req.user.plan);
 
+        if (!usage.allowed) {
+            return res.status(429).json({
+                error: "Daily message limit reached",
+                limit: usage.limit,
+                remaining: 0,
+                plan: req.user.plan,
+                upgradeMessage: "Upgrade to Pro for unlimited messages"
+            });
+        }
+
+        const userSessionId = `${req.user.id}:${sessionId}`;
         let session = await loadSession(userSessionId);
 
         if (!session || session.documentVersion !== DOCUMENT_VERSION) {
             session = {
                 documentVersion: DOCUMENT_VERSION,
                 messages: [
-                    { role: "system", content: "You are a helpful assistant. Always use available tools to fetch fresh information." }
+                    { role: "system", content: "You are a helpful assistant." }
                 ]
             };
         }
@@ -164,11 +177,36 @@ app.post("/chat", requireAuth, chatLimiter, validateChat, checkValidation, async
 
         await saveSession(userSessionId, session);
 
-        res.status(200).json({ reply });
+        // Increment usage after successful response
+        incrementUsage(req.user.id);
+
+        // Include usage info in response
+        res.status(200).json({
+            reply,
+            usage: {
+                remaining: usage.remaining - 1,
+                limit: usage.limit,
+                plan: req.user.plan
+            }
+        });
 
     } catch (error) {
         next(error);
     }
+});
+
+// GET /usage — returns current usage info for the authenticated user
+app.get("/usage", requireAuth, (req, res) => {
+    const usage = checkUsageLimit(req.user.id, req.user.plan);
+    const count = getUserUsage(req.user.id);
+
+    res.status(200).json({
+        plan: req.user.plan,
+        messagesUsed: count,
+        messagesRemaining: usage.remaining,
+        limit: usage.limit,
+        resetTime: "midnight UTC"
+    });
 });
 
 // DELETE /chat/:sessionId — clears a specific session
