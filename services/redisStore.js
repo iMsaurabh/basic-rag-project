@@ -6,6 +6,9 @@ import logger from "../utils/logger.js";
 //dont this (below one)
 //const redis = new Redis(process.env.REDIS_URL || "redis://localhost:6379");
 
+logger.info("Connecting to Redis", {
+    url: process.env.REDIS_URL ? "env var found" : "using default redis://redis:6379"
+});
 // Correct — use service name from docker-compose.yml
 const redis = new Redis(process.env.REDIS_URL || "redis://redis:6379", {
     // Required for Upstash TLS connection
